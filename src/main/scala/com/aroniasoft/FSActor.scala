@@ -1,6 +1,6 @@
 package com.aroniasoft
 
-import akka.actor.{Actor, ActorLogging, Props}
+import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import java.io.{File, FilenameFilter}
 
 class FSActor extends Actor with ActorLogging {
@@ -8,20 +8,26 @@ class FSActor extends Actor with ActorLogging {
 
   private var numberOfFiles: Int = 0
   private var numberOfProcessedFiles: Int = 0
+  private var fileSchedulerActor = Actor.noSender
+  private var singleThreadActor = Actor.noSender
 
   def receive = {
+    case InitMsg(scheduler, processor) =>
+      fileSchedulerActor = scheduler
+      singleThreadActor = processor
     case StartFolderScan(path, extList) =>
-      log.info(s"Start folder: ${path} scan with ${extList.mkString(", ")}")
-      val files: Array[File] = getListOfFiles(new File(path), createFilter(extList))
+      val files: Array[File] = getFilteredList(new File(path), extList)
       numberOfFiles = files.length
       log.info(s"Number of matched files: ${numberOfFiles}")
       for(f <- files) {
         val fileProcessingActor = context.actorOf(Props[FileProcessingActor])
+        fileProcessingActor ! FileProcessingActor.InitMsg(fileProcessingActor, singleThreadActor)
         fileProcessingActor ! ProcessFileMsg(f.getAbsolutePath)
       }
 
     case FileProcessed =>
       numberOfProcessedFiles = numberOfProcessedFiles + 1
+      log.info(s"PROCESSED: ${numberOfProcessedFiles}")
       if(numberOfProcessedFiles == numberOfFiles) {
         log.info("All files processed, shutting down...")
         context.system.terminate
@@ -32,17 +38,28 @@ class FSActor extends Actor with ActorLogging {
 
 object FSActor {
 
+  case class InitMsg(scheduler: ActorRef, processor: ActorRef)
+
   def createFilter(extList: List[String]) = {
     extList match {
       case Nil => Option.empty
       case _ => Option(new FilenameFilter {
-        override def accept(dir: File, name: String): Boolean = extList.map(name.toLowerCase.endsWith(_)).reduceLeft(_ || _)
+        override def accept(dir: File, name: String): Boolean = {
+          println(name)
+          println(dir.isDirectory)
+          println(extList.map(name.toLowerCase.endsWith(_)).reduceLeft(_ || _))
+          /*dir.isDirectory || */extList.map(name.toLowerCase.endsWith(_)).reduceLeft(_ || _)
+        }
       })
     }
   }
 
-  def getListOfFiles(dir: File, filenameFilter: Option[FilenameFilter] = Option.empty): Array[File] = {
-    val files = if(filenameFilter.isEmpty) dir.listFiles else dir.listFiles(filenameFilter.get)
+  private def getListOfFiles(dir: File): Array[File] = {
+    val files = dir.listFiles
     files ++ files.filter(_.isDirectory).flatMap(getListOfFiles(_))
+  }
+
+  def getFilteredList(dir: File, extList: List[String]) = {
+    getListOfFiles(dir).filter(f => !f.isDirectory && extList.map(f.getName.toLowerCase.endsWith(_)).reduceLeft(_ || _) )
   }
 }
